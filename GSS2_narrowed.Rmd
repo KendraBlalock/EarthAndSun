@@ -1,0 +1,690 @@
+---
+title: "Under the Sun"
+author: "Kendra Blalock"
+date: "9/7/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+options(knitr.kable.NA = '')
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(gt)
+library(janitor)
+library(tibble)
+library(vcd)
+library(ggplot2)
+library(cowplot)
+library(randomForest)
+library(caret)
+library(e1071)
+library(knitr)
+library(kableExtra)
+
+
+```
+![](EarthAndSun_top.png)
+
+## Data hunt and changed plans
+
+Recently I came across a new R table package that was ideal for displaying categorical data across study arms and would be super helpful for my work with clinical trials data. I set out to find some light-hearted data to test the package out. I settled on using data from the General Social Survey (GSS) from the independent research organization NORC at the University of Chicago (full citation below). The GSS has a set of science related questions, including this gem: "Now, does the Earth go around the Sun, or does the Sun go around the Earth?" With the numerous other categorical questions asked during the GSS, I thought this would be a perfect set of data to use. 
+
+Unfortunately, I ran into some major roadblocks with the new table package. Since it is still in development, I decided to pivot to kableExtra and learn a few new formatting tweaks. Even so, I was feeling less than satisfied, so I took a step further and ran a random forest model.
+
+Enough said, let's dig in:
+
+```{r data}
+
+#Load data
+GSS <- read_excel("GSS.xls")
+
+#Check out dataframe
+str(GSS)
+
+#Date range and distribution of downloaded data
+GSS <- GSS %>% filter(!is.na(year))
+GSS %>% count(year)
+
+#Count responses to "Now, does the Earth go around the Sun, or does the Sun go around the Earth?"
+GSS %>% count(earthsun)
+
+```
+
+Reviewing the distribution of answers to the sun/earth question, I was honestly surprised that "Sun around the earth" was as high as it was. For those who chose definitively, 22% got it wrong. I would love to give the American public the benefit of the doubt and say that a lot of people where just tired or confused by the time they reached this question, but I fear that is not the case. To see if there are any differences between individuals who believe that the sun revolves around the earth and vice versa, I narrowed down the sample to include only those who provided definitive answers on this and other relevant questions (excluding records containing refusals and "don't know" answers).       
+
+```{r complete}
+
+#Filter for complete responses for association testing and modeling
+GSS <- GSS %>%  filter((earthsun == "Earth around sun" | 
+                  earthsun == "Sun around earth") &
+                    marital != "No answer" &
+                    polviews != "Don't know" &
+                    polviews != "No answer" &
+                    born != "No answer" &
+                    born != "Don't know" & 
+                    family16 != "No answer" &
+                    childs != "Dk na" &
+                    class_ != "Don't know" &
+                    class_ != "No answer" &  
+                    mobile16 != "Don't know" &
+                    mobile16 != "No answer" &
+                    sprtprsn != "Dont know" &
+                    sprtprsn != "No answer" &
+                    relpersn != "Dont know" &
+                    relpersn != "No answer" &
+                    reborn != "Don't know" &
+                    reborn != "No answer" &
+                    god != "Don't know" &
+                    god != "No answer" &
+                    bible !="Don't know" & 
+                    bible != "No answer" & 
+                    postlife != "Don't know" &
+                    postlife != "No answer" &
+                    hsphys != "Dont know" & 
+                    hsphys != "No answer" &
+                    hschem != "Dont know" & 
+                    hschem != "No answer" & 
+                    hsbio != "Dont know" & 
+                    hsbio != "No answer" &
+                    colsci != "Dont know" &
+                    colsci != "No answer" &
+                    degree != "No answer" &
+                    toofast != "Dont know" &
+                    toofast != "No answer" &
+                    toofast != "Not applicable" &
+                    nextgen != "Dont know" &
+                    nextgen != "No answer" &
+                    nextgen != "Not applicable" &
+                    scifrom != "Dont know" &
+                    scifrom != "No answer" &
+                    scifrom != "Not applicable" & 
+                    consci != "Don't know" &
+                    consci != "No answer" &
+                    consci != "Not applicable" & 
+                    advfront != "Dont know" &
+                    advfront != "No answer" &
+                    advfront != "Not applicable" &  
+                    astrosci != "Dont know" &
+                    astrosci != "No answer" &
+                    astrosci != "Not applicable" &
+                    scibnfts != "No answer" &
+                    scibnfts != "Not applicable" & 
+                    natsci != "No answer") 
+``` 
+
+Since the data downloaded from the GSS site came as character data, I set factor levels for each of the questions. This also allowed me to set the orders of the factors as I wished for the tables. 
+
+```{r factors}
+
+#Set factors for categorical variables of interest
+GSS <- GSS %>% mutate(marital.factor = factor(marital, levels = 
+                                                  c("Never married", "Married",
+                                                    "Separated",  "Divorced", 
+                                                    "Widowed"))) %>% 
+  mutate(race.factor = factor(race, levels = 
+                                c("White", "Black", "Other"))) %>% 
+  mutate(polviews.factor = factor(polviews, levels = 
+                                    c("Extrmly conservative", "Conservative", 
+                                      "Slghtly conservative", "Moderate", "Slightly liberal", 
+                                      "Liberal", "Extremely liberal"))) %>% 
+  mutate(born.factor = factor(born, levels = 
+                                c("Yes", "No"))) %>% 
+  mutate(family16_rc = case_when(family16 == "Mother & father" ~ "Mother and father", 
+                                     T ~ "Other")) %>% 
+  mutate(family16_rc.factor = factor(family16_rc, levels = 
+                                       c("Mother and father", "Other"))) %>% 
+  mutate(age_rc = case_when(age >= 18 & age <= 34 ~ "18-34 yrs",
+                            age >= 35 & age <= 49 ~ "35-49 yrs", 
+                            age >= 50 & age <= 64 ~ "50-64 yrs",
+                            age >= 65 & age <= 79 ~ "65-79 yrs",
+                            age >= 80 ~ "80 yrs and above")) %>% 
+  mutate(childs_rc = case_when(childs == "0" ~ "No children",
+                               T ~ "Have children")) %>% 
+  mutate(childs_rc.factor = factor(childs_rc, levels = 
+                                     c("No children", "Have children"))) %>% 
+  mutate(class_.factor = factor(class_, levels = 
+                                  c("Lower class", "Working class", "Middle class",
+                                    "Upper class"))) %>% 
+  mutate(mobile16.factor = factor(mobile16, levels = 
+                                    c("Same city", "Same st,dif city", "Different state"))) %>% 
+  mutate(year = factor(year)) %>% 
+  mutate(sprtprsn_rc = case_when(sprtprsn == "Modeate spirtual" ~ "Moderate spirtual",
+                                  T ~ as.character(sprtprsn))) %>% 
+  mutate(sprtprsn.factor = factor(sprtprsn_rc, levels = 
+                                    c("Not spiritual", "Slight spiritual", "Moderate spirtual",
+                                      "Very spiritual"))) %>% 
+  mutate(relpersn_rc = case_when(relpersn == "Modrte religious" ~ "Moderate religious",
+                                 T ~ as.character(relpersn))) %>% 
+  mutate(relpersn.factor = factor(relpersn_rc, levels =
+                                     c("Not religious", "Slight religious", "Moderate religious",
+                                       "Very religious"))) %>% 
+  mutate(reborn.factor = factor(reborn, levels=
+                                  c("No", "Yes", "Don't know"))) %>% 
+  mutate(god.factor = factor(god, levels = 
+                               c("Dont believe", "No way to find out", 
+                                 "Some higher power", "Believe sometimes", 
+                                 "Believe but doubts", "Know god exists"))) %>% 
+  mutate(bible.factor = factor(bible, levels = 
+                                 c("Book of fables", "Inspired word", "Word of god",
+                                   "Other"))) %>% 
+  mutate(postlife.factor = factor(postlife, levels =
+                                    c("No", "Yes", "Not applicable"))) %>% 
+  mutate(hsphys.factor = factor(hsphys, levels = 
+                                  c("No", "Yes", "Not applicable"))) %>% 
+  mutate(hschem.factor = factor(hschem, levels = 
+                                  c("No", "Yes", "Not applicable"))) %>% 
+  mutate(hsbio.factor = factor(hsbio, levels = 
+                                  c("No", "Yes", "Not applicable"))) %>% 
+  mutate(colsci.factor = factor(colsci, levels = 
+                                 c("No", "Yes", "Not applicable"))) %>% 
+  mutate(degree.factor = factor(degree, levels = 
+                                  c("Lt high school", "High school", "Junior college", 
+                                    "Bachelor", "Graduate"))) %>% 
+  mutate(toofast.factor = factor(toofast, levels =
+                                   c("Strongly disagree", "Disagree", "Agree", 
+                                     "Strongly agree"))) %>% 
+  mutate(nextgen.factor = factor(nextgen, levels =
+                                   c("Strongly disagree", "Disagree", "Agree", 
+                                     "Strongly agree"))) %>% 
+  mutate(scifrom_rc = case_when(scifrom == "Tv" ~ "TV",
+                                scifrom == "The internet" ~ "Internet",
+                                T ~ "Other")) %>% 
+  mutate(scifrom_rc.factor = factor(scifrom_rc, levels = 
+                                      c("TV", "Internet", "Other"))) %>% 
+  mutate(consci.factor = factor(consci, levels = 
+                                  c("Hardly any", "Only some", "A great deal"))) %>% 
+  mutate(advfront.factor = factor(advfront , levels =
+                                   c("Strongly disagree", "Disagree", "Agree", 
+                                     "Strongly agree"))) %>% 
+  mutate(astrosci.factor = factor(astrosci, levels = 
+                                    c("Not at all scientific", "Sort of scientific",
+                                      "Very scientific"))) %>% 
+  mutate(scibnfts.factor = factor(scibnfts, levels = 
+                                    c("Benefits greater", "About equal if volunteered",
+                                      "Harmful results greater",  "Dont know"))) %>% 
+  mutate(natsci.factor = factor(natsci, levels = 
+                                  c("Too little", "About right", "Too much", "Don't know"))) %>% 
+  mutate(earthsun = factor(earthsun, levels = 
+                                  c("Earth around sun", "Sun around earth"))) %>% 
+  mutate(sex = as.factor(sex)) %>% 
+  mutate(age_rc = as.factor(age_rc))
+
+
+#Narrow the dataset to just the variables of interest for modeling
+GSS <- GSS %>% select(earthsun, sex, race.factor, age_rc, polviews.factor, 
+                       class_.factor, marital.factor, childs_rc.factor, 
+                       born.factor, family16_rc.factor, mobile16.factor,
+                       sprtprsn.factor, relpersn.factor, postlife.factor, 
+                       god.factor, reborn.factor, bible.factor,
+                       degree.factor, hsphys.factor, hschem.factor, 
+                       hsbio.factor, colsci.factor, 
+                       toofast.factor, nextgen.factor, advfront.factor, natsci.factor, 
+                       consci.factor, scibnfts.factor, astrosci.factor, scifrom_rc.factor)
+
+```
+
+## Table Creation
+
+My first step for putting together tables showing the differences between those who believe the earth orbits the sun and those who believe the sun orbits the earth is to setup a function using tabyl from the janitor package. This allowed me to get a simple n and % breakdown for each variable in each group of interest (finished tables are displayed further down.)   
+
+```{r tables}
+# Setup function to use for tables
+tab_func <- function(df, var, var2) {
+  var <- enquo(var)
+  var2 <- enquo(var2)
+  
+  df %>% tabyl(!! var, earthsun) %>% 
+    adorn_totals(c("col")) %>%
+    adorn_percentages("col") %>%
+    adorn_pct_formatting(digits = 2) %>%
+    adorn_ns() %>% 
+    rename("Variable" = !! var) %>% 
+    add_row(Variable = !!var2, 'Earth around sun' = "", 'Sun around earth' = "", 
+            Total = "",.before = 1)
+}
+
+
+##Setup Demographics, table 1
+#Variables included: sex, race.factor, age_rc, polviews.factor, 
+#class_.factor, marital.factor, childs_rc.factor, 
+#born.factor, family16_rc.factor, mobile16.factor
+
+Demographics <- tab_func(GSS, sex, "Sex") %>% 
+  bind_rows(tab_func(GSS, race.factor, "Race")) %>% 
+  bind_rows(tab_func(GSS, age_rc, "Age Group")) %>% 
+  bind_rows(tab_func(GSS, polviews.factor, "Political Views")) %>% 
+  bind_rows(tab_func(GSS, class_.factor, "Social Class")) %>% 
+  bind_rows(tab_func(GSS, marital.factor, "Marital Status")) %>% 
+  bind_rows(tab_func(GSS, childs_rc.factor, "Are Parents")) %>% 
+  bind_rows(tab_func(GSS, born.factor, "Born in US")) %>% 
+  bind_rows(tab_func(GSS, family16_rc.factor, "Lived w/ Both Parents at 16yrs Old")) %>% 
+  bind_rows(tab_func(GSS, mobile16.factor, "Location at 16yrs Old"))
+
+##Setup Religion, table 2
+#Variables included: sprtprsn.factor, relpersn.factor, postlife.factor, 
+#god.factor, reborn.factor, bible.factor
+Religion <- tab_func(GSS, sprtprsn.factor, "Level of Spirtuality") %>% 
+  bind_rows(tab_func(GSS, relpersn.factor, "Level of Religiousness")) %>% 
+  bind_rows(tab_func(GSS, postlife.factor, "Life after Death")) %>%
+  bind_rows(tab_func(GSS, god.factor, "Existence of God")) %>%
+  bind_rows(tab_func(GSS, reborn.factor, "'Born Again' Experience")) %>%
+  bind_rows(tab_func(GSS, bible.factor, "View of Bible")) 
+
+##Setup Education, table 3
+#Variables included: degree.factor, hsphys.factor, hschem.factor 
+#hsbio.factor, colsci.factor 
+Education <- tab_func(GSS, degree.factor, "Highest Degree") %>% 
+  bind_rows(tab_func(GSS, hsphys.factor, "Taken High School Physics")) %>% 
+  bind_rows(tab_func(GSS, hschem.factor, "Taken High School Chemistry")) %>% 
+  bind_rows(tab_func(GSS, hsbio.factor, "Taken High School Biology")) %>% 
+  bind_rows(tab_func(GSS, colsci.factor, "Taken Any College-Level Science")) 
+
+##Setup Science, table 4
+#Variables included: toofast.factor, nextgen.factor, advfront.factor, natsci.factor, 
+#consci.factor, scibnfts.factor, astrosci.factor, scifrom_rc.factor 
+Science <- tab_func(GSS, toofast.factor, "Science Changes Life Too Fast") %>% 
+  bind_rows(tab_func(GSS, nextgen.factor, 
+                     "Science Gives More Opportunities to Next Generation")) %>% 
+  bind_rows(tab_func(GSS, advfront.factor, 
+                     "Federal Goverment Should Support Science Research")) %>% 
+  bind_rows(tab_func(GSS, natsci.factor, "Amount Spent Supporting Scientific Research")) %>% 
+  bind_rows(tab_func(GSS, consci.factor, "Confidence in Scientific Community")) %>% 
+  bind_rows(tab_func(GSS, scibnfts.factor, "Benifits of Science Research Outweigh Harms")) %>% 
+  bind_rows(tab_func(GSS, astrosci.factor, "Astrology is Scientific")) %>% 
+  bind_rows(tab_func(GSS, scifrom_rc.factor, "Source of Information about Science")) 
+
+```
+
+Next, I added in chi-square to see if the differences between the two groups for each variable was statistically significant. The p-values are added to the same tables for ease of reference. I included the regular chi-squared with simulation p-value, the Bonferroni corrected p-value, and the chi-squared without simulation p-value.  
+
+
+```{r chisquared}
+
+## Chi-Squared (29 tests used for Bonferroni correction)
+#Demographics chisq 
+Demo_chi <- rownames_to_column(as.data.frame(t(as.matrix(data.frame
+                    (lapply(GSS[,c("sex", "race.factor", "age_rc", "polviews.factor", 
+                                   "class_.factor", "marital.factor", "childs_rc.factor",
+                                   "born.factor", "family16_rc.factor", "mobile16.factor" )], 
+                    function(x) chisq.test(table(x,GSS$earthsun), 
+                                           simulate.p.value = T)$p.value)))))) %>%
+  mutate(bcpv = V1*29) %>% 
+  mutate(bcpv = case_when(bcpv >= 1 ~ .99999999,
+                          T ~ bcpv)) %>% 
+  rename('Chisq p-value' = "V1") %>% 
+  rename('Bonferroni corrected p-value' = "bcpv") %>% 
+  left_join(rownames_to_column(as.data.frame(t(as.matrix(data.frame
+                   (lapply(GSS[,c("sex", "race.factor", "age_rc", "polviews.factor", 
+                                  "class_.factor", "marital.factor", "childs_rc.factor", 
+                                 "born.factor", "family16_rc.factor", "mobile16.factor")], 
+                    function(x) chisq.test(table(x,GSS$earthsun), 
+                                           simulate.p.value = F)$p.value)))))) %>% 
+             rename('Chisq w/out simulated p-value' = "V1")) %>% 
+  add_column(Variable = c("Sex", "Race", "Age Group", "Political Views", 
+                       "Social Class", "Marital Status", "Are Parents", 
+                       "Born in US", "Lived w/ Both Parents at 16yrs Old", 
+                       "Location at 16yrs Old"), .before = 1) %>% 
+  select(-rowname)
+
+#Religion chisq
+Rel_chi <- rownames_to_column(as.data.frame(t(as.matrix(data.frame
+                     (lapply(GSS[,c("sprtprsn.factor", "relpersn.factor", "postlife.factor", 
+                                    "god.factor", "reborn.factor", "bible.factor")], 
+                     function(x) chisq.test(table(x,GSS$earthsun), 
+                                            simulate.p.value = T)$p.value)))))) %>%
+  mutate(bcpv = V1*29) %>% 
+  mutate(bcpv = case_when(bcpv >= 1 ~ .99999999,
+                          T ~ bcpv)) %>% 
+  rename('Chisq p-value' = "V1") %>% 
+  rename('Bonferroni corrected p-value' = "bcpv") %>% 
+  left_join(rownames_to_column(as.data.frame(t(as.matrix(data.frame
+                     (lapply(GSS[,c("sprtprsn.factor", "relpersn.factor", "postlife.factor", 
+                                    "god.factor", "reborn.factor", "bible.factor")], 
+                     function(x) chisq.test(table(x,GSS$earthsun), 
+                                            simulate.p.value = F)$p.value)))))) %>% 
+              rename('Chisq w/out simulated p-value' = "V1")) %>% 
+  add_column(Variable = c("Level of Spirtuality", "Level of Religiousness", "Life after Death",
+                          "Existence of God", "'Born Again' Experience", 
+                          "View of Bible" ), .before = 1) %>% 
+  select(-rowname)
+
+
+#Education chisq
+Edu_chi <- rownames_to_column(as.data.frame(t(as.matrix(data.frame
+                    (lapply(GSS[,c("degree.factor", "hsphys.factor", "hschem.factor", 
+                                   "hsbio.factor", "colsci.factor")], 
+                    function(x) chisq.test(table(x,GSS$earthsun), 
+                                           simulate.p.value = T)$p.value)))))) %>%
+  mutate(bcpv = V1*29) %>% 
+  mutate(bcpv = case_when(bcpv >= 1 ~ .99999999,
+                          T ~ bcpv)) %>% 
+  rename('Chisq p-value' = "V1") %>% 
+  rename('Bonferroni corrected p-value' = "bcpv") %>% 
+  left_join(rownames_to_column(as.data.frame(t(as.matrix(data.frame
+                    (lapply(GSS[,c("degree.factor", "hsphys.factor", "hschem.factor", 
+                                   "hsbio.factor", "colsci.factor")], 
+                    function(x) chisq.test(table(x,GSS$earthsun), 
+                                           simulate.p.value = F)$p.value)))))) %>% 
+              rename('Chisq w/out simulated p-value' = "V1")) %>% 
+  add_column(Variable = c("Highest Degree", "Taken High School Physics", 
+                          "Taken High School Chemistry", "Taken High School Biology", 
+                          "Taken Any College-Level Science" ), .before = 1) %>% 
+  select(-rowname)
+
+#Science chisq
+Sci_chi <- rownames_to_column(as.data.frame(t(as.matrix(data.frame
+                    (lapply(GSS[,c("toofast.factor", "nextgen.factor", "advfront.factor",
+                                   "natsci.factor", "consci.factor", "scibnfts.factor",
+                                   "astrosci.factor", "scifrom_rc.factor")], 
+                    function(x) chisq.test(table(x,GSS$earthsun), 
+                                           simulate.p.value = T)$p.value)))))) %>%
+  mutate(bcpv = V1*29) %>% 
+  mutate(bcpv = case_when(bcpv >= 1 ~ .99999999,
+                          T ~ bcpv)) %>% 
+  rename('Chisq p-value' = "V1") %>% 
+  rename('Bonferroni corrected p-value' = "bcpv") %>% 
+  left_join(rownames_to_column(as.data.frame(t(as.matrix(data.frame
+                    (lapply(GSS[,c("toofast.factor", "nextgen.factor", "advfront.factor",
+                                   "natsci.factor", "consci.factor", "scibnfts.factor",
+                                   "astrosci.factor", "scifrom_rc.factor")], 
+                    function(x) chisq.test(table(x,GSS$earthsun), 
+                                           simulate.p.value = F)$p.value)))))) %>% 
+              rename('Chisq w/out simulated p-value' = "V1")) %>% 
+  add_column(Variable = c("Science Changes Life Too Fast", 
+                          "Science Gives More Opportunities to Next Generation", 
+                          "Federal Goverment Should Support Science Research", 
+                          "Amount Spent Supporting Scientific Research", 
+                          "Confidence in Scientific Community", 
+                          "Benifits of Science Research Outweigh Harms", 
+                          "Astrology is Scientific", "Source of Information about Science"),
+             .before = 1) %>% 
+  select(-rowname)
+
+Science2 <- Science %>% left_join(Sci_chi)
+
+
+```
+
+When you review the percentage breakdown for the two groups, you can see a strong difference for many of the variables. Given the sample size, it isn't surprising that many of the differences are statically significant. However, just because a difference is statistically significant does not mean that it is meaningful. To get a better gauge of the association level between the earth/sun category and the other variables, I added Cramers V (ranges from 0 to 1, with 1 being the strongest association).  
+
+```{r CramersV}
+##Cramer's V
+
+#Demographics Cramer's V
+Demo_v <- rownames_to_column(as.data.frame(t(as.matrix(data.frame
+                   (lapply(GSS[,c("sex", "race.factor", "age_rc", "polviews.factor", 
+                                  "class_.factor", "marital.factor", "childs_rc.factor",
+                                   "born.factor", "family16_rc.factor", "mobile16.factor" )], 
+                   function(x) assocstats(table(x,GSS$earthsun))$cramer)))))) %>%
+  rename('Cramers V' = "V1") %>% 
+  add_column(Variable = c("Sex", "Race", "Age Group", "Political Views", 
+                          "Social Class", "Marital Status", "Are Parents", 
+                          "Born in US", "Lived w/ Both Parents at 16yrs Old", 
+                          "Location at 16yrs Old"), .before = 1) %>% 
+  select(-rowname)
+
+Demographics2 <- Demographics %>% left_join(Demo_chi) %>% left_join(Demo_v)
+
+#Religion Cramer's V
+Rel_v <- rownames_to_column(as.data.frame(t(as.matrix(data.frame
+                    (lapply(GSS[,c("sprtprsn.factor", "relpersn.factor", "postlife.factor", 
+                                   "god.factor", "reborn.factor", "bible.factor")], 
+                     function(x) assocstats(table(x,GSS$earthsun))$cramer)))))) %>%
+  rename('Cramers V' = "V1") %>% 
+  add_column(Variable = c("Level of Spirtuality", "Level of Religiousness", "Life after Death",
+                          "Existence of God", "'Born Again' Experience", "View of Bible"),
+             .before = 1) %>% 
+  select(-rowname)
+
+Religion2 <- Religion %>% left_join(Rel_chi) %>% left_join(Rel_v)
+
+#Education Cramer's V
+Edu_v <- rownames_to_column(as.data.frame(t(as.matrix(data.frame
+                    (lapply(GSS[,c("degree.factor", "hsphys.factor", "hschem.factor", 
+                                   "hsbio.factor", "colsci.factor")], 
+                    function(x) assocstats(table(x,GSS$earthsun))$cramer)))))) %>%
+  rename('Cramers V' = "V1") %>% 
+  add_column(Variable = c("Highest Degree", "Taken High School Physics", 
+                          "Taken High School Chemistry", "Taken High School Biology", 
+                          "Taken Any College-Level Science" ), .before = 1) %>% 
+  select(-rowname)
+
+Education2 <- Education %>% left_join(Edu_chi) %>% left_join(Edu_v)
+
+#Science Cramer's V
+Sci_v <- rownames_to_column(as.data.frame(t(as.matrix(data.frame
+                      (lapply(GSS[,c("toofast.factor", "nextgen.factor", "advfront.factor",
+                                     "natsci.factor", "consci.factor", "scibnfts.factor",
+                                     "astrosci.factor", "scifrom_rc.factor")], 
+                      function(x) assocstats(table(x,GSS$earthsun))$cramer)))))) %>%
+  rename('Cramers V' = "V1") %>% 
+  add_column(Variable = c("Science Changes Life Too Fast", 
+                          "Science Gives More Opportunities to Next Generation", 
+                          "Federal Goverment Should Support Science Research", 
+                          "Amount Spent Supporting Scientific Research", 
+                          "Confidence in Scientific Community", 
+                          "Benifits of Science Research Outweigh Harms", 
+                          "Astrology is Scientific", 
+                          "Source of Information about Science"), .before = 1) %>% 
+  select(-rowname)
+
+Science2 <- Science %>% left_join(Sci_chi) %>% left_join(Sci_v)
+
+
+```
+
+Not surprisingly, although the differences between the groups was significant for many variables, the strength of the associations were weak overall. This makes intuitive sense as many complicated social factors and past experiences would likely contribute to a person's beliefs. 
+
+## Formatted Tables
+
+Although I have used the kableExtra package before, I haven't had the opportunity to try out some of the available formatting options. Below, you can see I made some custom alignments on column headings, added bold formatting, and indented the labels under each category. My favorite though is the option to keep the column header floating at top as you scroll down the chart, which is so helpful when reviewing long tables.     
+
+
+```{r print}
+kable(Demographics2,
+      align = c("l", "c", "c", "c", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = c("hover", "condensed"),
+                fixed_thead = T) %>%
+  column_spec(1, bold = T) %>%
+  add_indent(c(2:3, 5:7, 9:13, 15:21, 23:26, 28:32, 34:35, 37:38,
+               40:41, 43:45))
+
+kable(Religion2,
+      align = c("l", "c", "c", "c", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = c("hover", "condensed"),
+                fixed_thead = T) %>%
+  column_spec(1, bold = T) %>%
+  add_indent(c(2:5, 7:10, 12:14, 16:21, 23:24, 26:29))
+
+kable(Education2,
+      align = c("l", "c", "c", "c", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = c("hover", "condensed"),
+                fixed_thead = T) %>%
+  column_spec(1, bold = T) %>%
+  add_indent(c(2:6, 8:10, 12:14, 16:18, 20:22))
+
+kable(Science2,
+      align = c("l", "c", "c", "c", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = c("hover", "condensed"),
+                fixed_thead = T) %>%
+  column_spec(1, bold = T) %>%
+  add_indent(c(2:5, 7:10, 12:15, 17:20, 22:24, 26:29, 31:33, 35:37))
+
+```
+
+## Machine Learning with Random Forest Modeling 
+
+Looking over the charts, you can see large number (29) of variables, most which do differ significantly between the two groups, but which likely only weakly affect the variable of interest. It sets up an interesting situation to see if machine learning could the use breadth of variables to help predict if a person would answer the question correctly. 
+
+Dipping my toes into the machine learning world, I went with a random forest modeling approach. I started by subsetting the data into a training set and a testing set. 
+
+```{r rf_setup}
+
+##Random Forest Prediction
+
+
+###Modeling
+
+#Separate out training and test datasets
+set.seed(135)
+
+sep <- sample(2, nrow(GSS), replace = T, prob = c(.7, .3))
+
+train <- GSS[sep==1,]
+test <- GSS[sep==2,]
+
+```
+
+From here I setup a basic model with the training data and plotted the out-of-bag error rate.
+
+```{r model1}
+#random forest
+
+set.seed(246)
+
+model <- randomForest(earthsun ~ ., train, proximity = T)
+
+model
+
+oob_error <- data.frame(Trees=rep(1:nrow(model$err.rate), times=3),
+                        Type=rep(c("OOB", "Earth around sun", "Sun around earth"),
+                                 each=nrow(model$err.rate)), 
+                        Error=c(model$err.rate[,"OOB"],
+                                model$err.rate[, "Earth around sun"], 
+                                model$err.rate[, "Sun around earth"]))
+
+oob_error$Type[oob_error$Type == "OOB"] <- "Overall"
+
+
+ggplot(oob_error, aes(x=Trees, y=Error))+
+  geom_line(aes(color=Type))+
+  labs(title = "OOB Error Rate by Number of Trees",
+       y = "Error Rate",
+       x = "Number of Trees") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.line.x.bottom = element_line(color = "grey30"),
+        axis.line.y.left = element_line(color = "grey30"),
+        panel.background = element_blank())+ 
+  guides(color = guide_legend(reverse = TRUE))
+
+
+```
+
+An out-of-bag error rate of 20.72% isn't something to write home about, and even worse is the plot with the error rate for "Sun around earth" stabilizing at the very top. Thankfully, no one is actually in need of a model to predict the correct understanding of the setup of the solar system. 
+
+Next step is to run the model on the test data and measure the performance. 
+
+```{r predict}
+#Predict
+predict2 <- predict(model, test)
+confusionMatrix(table(predict2, test$earthsun)) 
+
+```
+
+When I tested the model, I received an accuracy of 0.7897. More disheartening is the placement of almost the entire sample in the "Earth around sun" group. I could have placed them in this category before the whole process started since approximately 75% of the sample falls into it. 
+
+I ran the tuneRF function to see if any small improvement of the model could be made by adjusting the mtry (number of variables tried after each split). The previous, automatically selected mtry was 5. I set the limit to 300 trees as not much improvement was seen after that on the plot.  
+
+```{r tune}
+t <- tuneRF(train[,-1], train$earthsun,
+       stepFactor = 0.5, 
+       plot= T, 
+       ntreeTry = 300,
+       trace= T,
+       improve = 0.05)
+
+```
+
+It looks like the out-of-bag error rate was lowest when the mtry = 2, so I have updated the model with this and a tree limit of 300. 
+
+```{r model2}
+#updating the model again
+model_v2 <- randomForest(earthsun ~ ., train, proximity = T,
+                         ntree= 300, 
+                         mtry = 2,
+                         importance = T)
+
+model_v2
+
+```
+
+The out-of-bag error rate is now down to 20.42%. I will take any improvement I can get. Now to see how the updated model preforms with the testing data. 
+
+```{r predict_2}
+predict2_v2 <- predict(model_v2, test)
+confusionMatrix(table(predict2_v2, test$earthsun))  
+
+```
+
+Unfortunately, the accuracy rate stayed the same. Upside of all of this process is that one day when I run a model for work that may have some actual consequence to the world, I will be that much more excited when the model preforms well (a girl can dream). 
+
+This does still provide a great opportunity to dig into the model and understand it a bit more. Below is a frequency plot of the number of nodes for the random forest trees. The peak is hovering around 575 nodes. 
+
+
+```{r nodes}
+
+#number of nodes
+data_frame(treesize(model_v2)) %>% 
+  ggplot() + 
+  geom_bar(aes(x=treesize(model_v2))) +
+  labs(title = "Number of Nodes Used in Random Forests",
+       y = "Count",
+       x = "Number of Nodes Used") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.line.x.bottom = element_line(color = "grey30"),
+        axis.line.y.left = element_line(color = "grey30"),
+        panel.background = element_blank())+ 
+  guides(color = guide_legend(reverse = TRUE))
+
+
+```
+
+Another item to review is which variables were most important in the model. Below I have called the top variables.  
+
+```{r importance}
+#variables of importance 
+varImpPlot(model_v2,
+           sort = T,
+           n.var = 10,
+           main= "Top 10 of Variable Importance")
+
+```
+
+Ideally it would be great for models to be as simple as they can, and since the performance on this one is lower, why not try to at least simplify it by only using some of the top variables? 
+
+```{r model3}
+#simplified model 
+#remove other variables
+train2 <- train %>% select(earthsun, polviews.factor, age_rc, marital.factor, degree.factor,
+                           god.factor, sprtprsn.factor, class_.factor, toofast.factor, 
+                           relpersn.factor, scibnfts.factor)
+
+test2 <- test %>% select(earthsun, polviews.factor, age_rc, marital.factor, degree.factor,
+                           god.factor, sprtprsn.factor,  class_.factor, toofast.factor, 
+                           relpersn.factor, scibnfts.factor)
+
+#rerun model with less variables, remove mtry
+model_v3 <- randomForest(earthsun ~ ., train2, proximity = T)
+
+model_v3
+
+#Predict
+predict3_v3 <- predict(model_v3, test2)
+confusionMatrix(table(predict3_v3, test2$earthsun))  
+
+```
+
+The simplified model increased the out-of-bag error rate to 22% with the training data and brought the accuracy down to 0.7755 with the test data.
+
+# Wrapping up
+
+All around this was an interesting exercise allowing me to try a few new things. Many thanks to my friend Phil, <https://github.com/probertswsu>, who helped me see the trees from the forest during this process (pun intended).
+
+The General Social Survey (GSS) is a project of the independent research organization NORC at the University of Chicago, with principal funding from the National Science Foundation. Smith, Tom W., Davern, Michael, Freese, Jeremy, and Morgan, Stephen, General Social Surveys, 1972-2018 [machine-readable data file] /Principal Investigator, Smith, Tom W.; Co-Principal Investigators, Michael Davern, Jeremy Freese, and Stephen Morgan; Sponsored by National Science Foundation. --NORC ed.-- Chicago: NORC, 2018: NORC at the University of Chicago [producer and distributor]. Data accessed from the GSS Data Explorer website at gssdataexplorer.norc.org. 
+
+![](EarthAndSun_OuterSpace.png)
+
